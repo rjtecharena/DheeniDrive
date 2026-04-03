@@ -1,6 +1,7 @@
 from flask import Flask, render_template, request, redirect, url_for, flash
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy import desc
+import time
 
 app = Flask(__name__)
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///masjid_rides.db'
@@ -93,4 +94,5 @@ def reset_data():
 if __name__ == '__main__':
     with app.app_context():
         db.create_all()
+    time.sleep(5)
     app.run(debug=True, port=5000)
