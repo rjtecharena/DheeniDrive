@@ -1,98 +1,160 @@
-from flask import Flask, render_template, request, redirect, url_for, flash
-from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy import desc
-import time
+import os
+from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
+from supabase import create_client, Client
+from datetime import datetime
+import pytz
+from functools import wraps
+from dotenv import load_dotenv
+
+load_dotenv()
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///masjid_rides.db'
-app.config['SECRET_KEY'] = 'masjid_community_2026'
-db = SQLAlchemy(app)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dheeni_drive_ist_2026')
 
-# Database Models
-class Ride(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    driver_name = db.Column(db.String(100), nullable=False)
-    driver_phone = db.Column(db.String(20), nullable=False)
-    vehicle_type = db.Column(db.String(20)) # 'Two-wheeler' or 'Car'
-    total_seats = db.Column(db.Integer, nullable=False)
-    seats_taken = db.Column(db.Integer, default=0)
-    departure_time = db.Column(db.String(20))
-    source_url = db.Column(db.String(500))      # Google Maps Link
-    destination_url = db.Column(db.String(500)) # Google Maps Link
-    bookings = db.relationship('Booking', backref='ride', lazy=True, cascade="all, delete-orphan")
+# --- SUPABASE CONFIG ---
+URL = os.environ.get("SUPABASE_URL")
+KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(URL, KEY)
 
-class Booking(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    ride_id = db.Column(db.Integer, db.ForeignKey('ride.id'), nullable=False)
-    seeker_name = db.Column(db.String(100), nullable=False)
-    seeker_phone = db.Column(db.String(20), nullable=False)
+# --- AUTH DECORATOR ---
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
-# Routes
+# --- HELPERS ---
+def get_today_start_iso():
+    """Calculates 12:00 AM Today in IST for filtering."""
+    tz = pytz.timezone('Asia/Kolkata')
+    today_start = datetime.now(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_start.isoformat()
+
+def format_timestamp(ts_string):
+    """Converts Supabase UTC string to IST Display Time."""
+    try:
+        dt_utc = datetime.fromisoformat(ts_string.replace('Z', '+00:00'))
+        dt_ist = dt_utc.astimezone(pytz.timezone('Asia/Kolkata'))
+        return dt_ist.strftime('%I:%M %p')
+    except: return ""
+
+# --- AUTH ROUTES ---
+
+@app.route('/login')
+def login():
+    return render_template('login.html')
+
+@app.route('/auth/google')
+def auth_google():
+    """Triggers Google OAuth via Supabase."""
+    redirect_url = url_for('auth_callback', _external=True)
+    res = supabase.auth.sign_in_with_oauth({
+        "provider": "google",
+        "options": {"redirect_to": redirect_url}
+    })
+    return redirect(res.url)
+
+@app.route('/auth/callback')
+def auth_callback():
+    """Landing page for Google Redirect."""
+    return render_template('callback.html')
+
+@app.route('/set-session-from-callback', methods=['POST'])
+def set_session_from_callback():
+    """Exchanges Google Code for a Flask Session."""
+    data = request.json
+    code = data.get('code')
+    if not code:
+        return jsonify({"status": "error"}), 400
+    
+    try:
+        res = supabase.auth.exchange_code_for_session({"auth_code": code})
+        user = res.user
+        session['user_id'] = user.id
+        session['user_name'] = user.user_metadata.get('full_name', 'Verified User')
+        session['user_email'] = user.email
+        return jsonify({"status": "success"})
+    except Exception as e:
+        print(f"Auth Exchange Error: {e}")
+        return jsonify({"status": "error"}), 400
+
+# --- APP ROUTES ---
+
 @app.route('/')
+@login_required
 def index():
     filter_type = request.args.get('filter', 'all')
-    sort_by = request.args.get('sort', 'type') # Default sort by Vehicle Type (Bikes first)
+    my_activity = request.args.get('my_activity') == 'true'
+    user_email = session.get('user_email')
+    
+    today_iso = get_today_start_iso()
 
-    query = Ride.query
+    try:
+        # Fetch today's rides with nested bookings
+        query = supabase.table("ride").select("*, booking(*)").gte("created_at", today_iso)
+        
+        if filter_type == 'bike':
+            query = query.eq("vehicle_type", "Two-wheeler")
+        elif filter_type == 'car':
+            query = query.eq("vehicle_type", "Car")
+        
+        response = query.execute()
+        all_rides = response.data
+    except: all_rides = []
 
-    # 1. Filtering
-    if filter_type == 'bike':
-        query = query.filter_by(vehicle_type='Two-wheeler')
-    elif filter_type == 'car':
-        query = query.filter_by(vehicle_type='Car')
+    display_rides = []
+    for ride in all_rides:
+        ride['formatted_time'] = format_timestamp(ride.get('created_at'))
+        is_driver = ride.get('driver_email') == user_email
+        is_seeker = any(b['seeker_email'] == user_email for b in ride.get('booking', []))
+        
+        if not my_activity or (is_driver or is_seeker):
+            display_rides.append(ride)
 
-    # 2. Sorting Logic
-    if sort_by == 'availability':
-        # Order by most seats available
-        query = query.order_by((Ride.total_seats - Ride.seats_taken).desc())
-    else:
-        # Default: Two-wheelers first, then available seats
-        query = query.order_by(desc(Ride.vehicle_type), (Ride.total_seats - Ride.seats_taken).desc())
-
-    rides = query.all()
-    return render_template('index.html', rides=rides, current_filter=filter_type)
+    return render_template('index.html', rides=display_rides, current_filter=filter_type, my_activity=my_activity)
 
 @app.route('/offer', methods=['POST'])
+@login_required
 def offer_ride():
-    new_ride = Ride(
-        driver_name=request.form['name'],
-        driver_phone=request.form['phone'],
-        vehicle_type=request.form['vehicle'],
-        total_seats=int(request.form['seats']),
-        departure_time=request.form['time'],
-        source_url=request.form['source_url'],
-        destination_url=request.form['destination_url']
-    )
-    db.session.add(new_ride)
-    db.session.commit()
-    flash("Ride posted! Share the link in the WhatsApp group.")
+    data = {
+        "driver_name": session['user_name'],
+        "driver_email": session['user_email'],
+        "driver_phone": request.form['phone'],
+        "vehicle_type": request.form['vehicle'],
+        "total_seats": int(request.form['seats']),
+        "seats_taken": 0,
+        "departure_time": request.form['time'],
+        "source_url": request.form['source_url'],
+        "destination_url": request.form['destination_url']
+    }
+    supabase.table("ride").insert(data).execute()
+    flash("Ride published successfully!")
     return redirect(url_for('index'))
 
 @app.route('/join/<int:ride_id>', methods=['POST'])
+@login_required
 def join_ride(ride_id):
-    ride = Ride.query.get_or_404(ride_id)
-    if ride.seats_taken < ride.total_seats:
-        new_booking = Booking(
-            ride_id=ride.id, 
-            seeker_name=request.form['seeker_name'],
-            seeker_phone=request.form['seeker_phone']
-        )
-        ride.seats_taken += 1
-        db.session.add(new_booking)
-        db.session.commit()
-        flash(f"Seat booked with {ride.driver_name}!")
+    ride_resp = supabase.table("ride").select("total_seats, seats_taken").eq("id", ride_id).single().execute()
+    ride = ride_resp.data
+
+    if ride['seats_taken'] < ride['total_seats']:
+        booking_data = {
+            "ride_id": ride_id,
+            "seeker_name": session['user_name'],
+            "seeker_email": session['user_email'],
+            "seeker_phone": request.form['seeker_phone']
+        }
+        supabase.table("booking").insert(booking_data).execute()
+        supabase.table("ride").update({"seats_taken": ride['seats_taken'] + 1}).eq("id", ride_id).execute()
+        flash("Seat secured! InshaAllah.")
     return redirect(url_for('index'))
 
-@app.route('/admin/reset', methods=['POST'])
-def reset_data():
-    db.session.query(Booking).delete()
-    db.session.query(Ride).delete()
-    db.session.commit()
-    flash("All data cleared for the new week.")
-    return redirect(url_for('index'))
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login'))
 
 if __name__ == '__main__':
-    with app.app_context():
-        db.create_all()
-    time.sleep(5)
     app.run(debug=True, port=5000)

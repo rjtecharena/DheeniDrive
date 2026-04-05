@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Authenticating...</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-50 flex items-center justify-center min-h-screen">
+    <div class="text-center">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-emerald-800 mx-auto mb-4"></div>
+        <p class="text-slate-600 font-bold">Verifying your identity...</p>
+    </div>
+    <script>
+        async function handleAuth() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const code = urlParams.get('code');
+            if (code) {
+                try {
+                    const response = await fetch('/set-session-from-callback', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ code: code })
+                    });
+                    if (response.ok) { window.location.href = "/"; } 
+                    else { window.location.href = "/login?error=sync_failed"; }
+                } catch (err) { window.location.href = "/login?error=network_issue"; }
+            } else { window.location.href = "/login"; }
+        }
+        handleAuth();
+    </script>
+</body>
+</html>
