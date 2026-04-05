@@ -49,10 +49,15 @@ def login():
 @app.route('/auth/google')
 def auth_google():
     """Triggers Google OAuth via Supabase."""
-    redirect_url = url_for('auth_callback', _external=True)
+    # Logic: Use the RENDER_EXTERNAL_URL if it exists, otherwise fallback to local
+    base_url = os.environ.get('RENDER_EXTERNAL_URL', 'http://127.0.0.1:5000')
+    redirect_url = f"{base_url}/auth/callback"
+    
     res = supabase.auth.sign_in_with_oauth({
         "provider": "google",
-        "options": {"redirect_to": redirect_url}
+        "options": {
+            "redirect_to": redirect_url
+        }
     })
     return redirect(res.url)
 
