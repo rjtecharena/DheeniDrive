@@ -17,6 +17,13 @@ KEY = os.environ.get("SUPABASE_KEY")
 supabase: Client = create_client(URL, KEY)
 
 # --- AUTH DECORATOR ---
+def get_last_ride_details(email):
+    try:
+        # Fetch the single latest ride by this user, regardless of date
+        res = supabase.table("ride").select("*").eq("driver_email", email).order("created_at", desc=True).limit(1).execute()
+        return res.data[0] if res.data else None
+    except:
+        return None
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -75,6 +82,7 @@ def index():
     sort_by = request.args.get('sort', 'time') # Default: Departure Time
     my_activity = request.args.get('my_activity') == 'true'
     user_email = session.get('user_email')
+    last_ride = get_last_ride_details(user_email)
     
     try:
         query = supabase.table("ride").select("*, booking(*)").gte("created_at", get_today_start_iso()).eq("is_active", True)
@@ -102,18 +110,22 @@ def index():
     else:
         processed_rides.sort(key=lambda x: x['departure_time'])
 
-    return render_template('index.html', rides=processed_rides, current_filter=filter_type, 
+    return render_template('index.html', rides=processed_rides,last_ride=last_ride, current_filter=filter_type, 
                            my_activity=my_activity, current_sort=sort_by)
 
 @app.route('/offer', methods=['POST'])
 @login_required
 def offer_ride():
+    is_rental = request.form.get('is_rental') == 'true'
+    fare = int(request.form.get('fare', 0)) if is_rental else 0
+
     supabase.table("ride").insert({
         "driver_name": session['user_name'], "driver_email": session['user_email'],
         "driver_phone": request.form['phone'], "vehicle_type": request.form['vehicle'],
         "total_seats": int(request.form['seats']), "seats_taken": 0,
         "departure_time": request.form['time'], "source_url": request.form['source_url'],
-        "destination_url": request.form['destination_url']
+        "destination_url": request.form['destination_url'],
+        "is_rental": is_rental, "fare_per_person": fare
     }).execute()
     flash("Ride published on Jumma Drive!")
     return redirect(url_for('index'))
